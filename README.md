@@ -1,3 +1,11 @@
+
+
+
+
+https://github.com/user-attachments/assets/1e4f726d-d756-47d7-83d9-79f0798ceff1
+
+
+
 # Vision-Based Person Following Drone using ROS 2, PX4 & YOLOv8
 
 An autonomous drone capable of detecting and following a person in simulation using **ROS 2 Jazzy**, **PX4 SITL**, **Gazebo Harmonic**, and **YOLOv8**.
