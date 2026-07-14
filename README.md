@@ -246,7 +246,10 @@ source ~/px4_ros_ws/install/setup.bash
 
 ros2 run person_follower follower
 
-Source Code: import rclpy
+```
+Source Code For Follower:
+```bash
+import rclpy
 from rclpy.node import Node
 from rclpy.clock import Clock
 
@@ -439,8 +442,8 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-```
 
+```
 Expected output
 
 ```
