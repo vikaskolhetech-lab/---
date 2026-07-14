@@ -245,6 +245,200 @@ source /opt/ros/jazzy/setup.bash
 source ~/px4_ros_ws/install/setup.bash
 
 ros2 run person_follower follower
+
+Source Code: import rclpy
+from rclpy.node import Node
+from rclpy.clock import Clock
+
+# QoS imports
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+    HistoryPolicy,
+)
+
+# PX4 message imports
+from px4_msgs.msg import (
+    TrajectorySetpoint,
+    OffboardControlMode,
+    VehicleCommand,
+    VehicleLocalPosition,
+)
+
+# Detection message
+from vision_interfaces.msg import Detection
+
+
+class OffboardControl(Node):
+
+    def __init__(self):
+        super().__init__('offboard_control')
+
+        # Publishers
+        self.mode_pub = self.create_publisher(
+            OffboardControlMode,
+            '/fmu/in/offboard_control_mode',
+            10
+        )
+
+        self.setpoint_pub = self.create_publisher(
+            TrajectorySetpoint,
+            '/fmu/in/trajectory_setpoint',
+            10
+        )
+
+        self.cmd_pub = self.create_publisher(
+            VehicleCommand,
+            '/fmu/in/vehicle_command',
+            10
+        )
+
+        # QoS profile (depth=10 for better reliability)
+        px4_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,                     # <-- increased from 1
+        )
+
+        self.local_pos_sub = self.create_subscription(
+            VehicleLocalPosition,
+            "/fmu/out/vehicle_local_position_v1",
+            self.local_position_callback,
+            px4_qos,
+        )
+
+        # Subscriber for person detection
+        self.detection_sub = self.create_subscription(
+            Detection,
+            '/vision/detections',
+            self.detection_callback,
+            10
+        )
+
+        # Store current position
+        self.current_x = 0.0
+        self.current_y = 0.0
+        self.current_z = 0.0
+
+        # Target position (setpoints)
+        self.target_x = 0.0
+        self.target_y = 0.0
+        self.target_z = -5.0
+
+        # Person detection state
+        self.person_detected = False
+        self.last_detection_time = self.get_clock().now()
+
+        # Counter for offboard/arm commands
+        self.offboard_counter = 0
+
+        # 20 Hz timer
+        self.create_timer(0.05, self.timer_callback)
+
+    def local_position_callback(self, msg):
+        self.current_x = msg.x
+        self.current_y = msg.y
+        self.current_z = msg.z
+
+        self.get_logger().info(
+            f"Current Position: x={msg.x:.2f}, y={msg.y:.2f}, z={msg.z:.2f}"
+        )
+
+    def send_vehicle_command(self, command, param1=0.0, param2=0.0):
+        msg = VehicleCommand()
+        msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        msg.command = command
+        msg.param1 = float(param1)
+        msg.param2 = float(param2)
+        msg.target_system = 1
+        msg.target_component = 1
+        msg.source_system = 1
+        msg.source_component = 1
+        msg.from_external = True
+        self.cmd_pub.publish(msg)
+
+    # ---------- FIXED detection_callback ----------
+    def detection_callback(self, msg):
+        if msg.class_name != "person":
+            return
+
+        # Update timestamp so timer does NOT reset targets
+        self.last_detection_time = self.get_clock().now()
+
+        error = msg.center_x - 0.5
+
+        # Move 30 cm in front of current position (no cumulative drift)
+        self.target_x = self.current_x + 0.30
+        # Lateral correction based on error
+        self.target_y = self.current_y + error * 1.5
+        self.target_z = -5.0
+
+        self.get_logger().info(
+            f"Person detected  "
+            f"x={self.current_x:.2f}->{self.target_x:.2f}  "
+            f"y={self.current_y:.2f}->{self.target_y:.2f}"
+        )
+
+    def timer_callback(self):
+        # Offboard control mode
+        mode_msg = OffboardControlMode()
+        mode_msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        mode_msg.position = True
+        mode_msg.velocity = False
+        mode_msg.acceleration = False
+        mode_msg.attitude = False
+        mode_msg.body_rate = False
+        self.mode_pub.publish(mode_msg)
+
+        # Offboard and arm commands (first 2.5 seconds)
+        if self.offboard_counter == 20:
+            self.send_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+                1.0,
+                6.0,
+            )
+            self.get_logger().info("Offboard Enabled")
+
+        if self.offboard_counter == 40:
+            self.send_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+                1.0,
+            )
+            self.get_logger().info("Vehicle Armed")
+
+        if self.offboard_counter < 50:
+            self.offboard_counter += 1
+
+        # Hover if no detection for >1 second (now works because timestamp is updated)
+        now = self.get_clock().now()
+        dt = (now - self.last_detection_time).nanoseconds / 1e9
+        if dt > 1.0:
+            self.target_x = self.current_x
+            self.target_y = self.current_y
+            self.target_z = -5.0
+            self.person_detected = False
+        # else keep target from detection callback
+
+        # Publish trajectory setpoint
+        sp = TrajectorySetpoint()
+        sp.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        sp.position = [self.target_x, self.target_y, self.target_z]
+        sp.yaw = 0.0
+        self.setpoint_pub.publish(sp)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = OffboardControl()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
 ```
 
 Expected output
